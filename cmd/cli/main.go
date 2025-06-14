@@ -20,6 +20,12 @@ import (
 // It parses command-line flags, sets up the SSH connection, and
 // either executes a remote script or starts an interactive shell.
 func main() {
+	// Capture the current working directory immediately to support relative paths
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Failed to get current working directory: %v", err)
+	}
+
 	// 1. Define and parse command-line flags for connection details.
 	user := flag.String("user", os.Getenv("USER"), "SSH username (defaults to current user)")
 	host := flag.String("host", "", "Remote server host or IP address")
@@ -28,6 +34,11 @@ func main() {
 	scriptFlags := flag.String("script-flags", "", "A string of flags to pass to the remote script (e.g., \"--backup-dir /tmp --dry-run\")")
 	keyPath := flag.String("key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to your SSH private key")
 	flag.Parse()
+
+	// Resolve script path relative to the original working directory
+	if *scriptPath != "" && !filepath.IsAbs(*scriptPath) {
+		*scriptPath = filepath.Join(cwd, *scriptPath)
+	}
 
 	// Validate that the host is provided.
 	if *host == "" {
