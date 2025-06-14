@@ -40,6 +40,7 @@ func main() {
 	keyPath := flag.String("key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to your SSH private key")
 	authViaEnv := flag.Bool("auth-via-env", false, "Use SSH_KEY_PASSPHRASE environment variable for authentication")
 	useAgent := flag.Bool("use-agent", true, "Use ssh-agent for authentication (default: true)")
+	askForPassphrase := flag.Bool("ask-for-passphrase", false, "Prompt for passphrase if key is encrypted and other methods fail")
 	flag.Parse()
 
 	// Ensure cached passphrase is cleared when program exits
@@ -59,7 +60,7 @@ func main() {
 
 	// 2. Prepare the SSH client configuration.
 	// This includes authentication methods and host key verification.
-	authMethods, err := getAuthMethods(*keyPath, *authViaEnv, *useAgent)
+	authMethods, err := getAuthMethods(*keyPath, *authViaEnv, *useAgent, *askForPassphrase)
 	if err != nil {
 		log.Fatalf("Failed to setup authentication: %v", err)
 	}
@@ -225,7 +226,7 @@ func monitorWindowSize(session *ssh.Session, fd int) {
 }
 
 // getAuthMethods returns a slice of authentication methods, prioritizing ssh-agent if available
-func getAuthMethods(keyPath string, authViaEnv bool, useAgent bool) ([]ssh.AuthMethod, error) {
+func getAuthMethods(keyPath string, authViaEnv bool, useAgent bool, askForPassphrase bool) ([]ssh.AuthMethod, error) {
 	var authMethods []ssh.AuthMethod
 
 	// Try ssh-agent first if enabled
@@ -243,12 +244,19 @@ func getAuthMethods(keyPath string, authViaEnv bool, useAgent bool) ([]ssh.AuthM
 
 	// Fallback to key file authentication only if ssh-agent failed
 	log.Println("Falling back to key file authentication")
-	keyAuth, err := getKeyAuth(keyPath, authViaEnv)
+	keyAuth, err := getKeyAuth(keyPath, authViaEnv, askForPassphrase)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup key file authentication: %v", err)
 	}
 
-	authMethods = append(authMethods, keyAuth)
+	if keyAuth != nil {
+		authMethods = append(authMethods, keyAuth)
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no authentication methods available - try using ssh-agent or the -ask-for-passphrase flag")
+	}
+
 	return authMethods, nil
 }
 
@@ -286,7 +294,7 @@ func getAgentAuth() ssh.AuthMethod {
 }
 
 // getKeyAuth creates an ssh.AuthMethod from a private key file
-func getKeyAuth(keyPath string, authViaEnv bool) (ssh.AuthMethod, error) {
+func getKeyAuth(keyPath string, authViaEnv bool, askForPassphrase bool) (ssh.AuthMethod, error) {
 	// Expand tilde (~) to the user's home directory.
 	if len(keyPath) >= 2 && keyPath[:2] == "~/" {
 		home, err := os.UserHomeDir()
@@ -303,11 +311,18 @@ func getKeyAuth(keyPath string, authViaEnv bool) (ssh.AuthMethod, error) {
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		// If the key is passphrase-protected, handle based on authViaEnv flag
+		// If the key is passphrase-protected, handle based on flags
 		if authViaEnv {
 			return handleAuthWithEnvVar(key, keyPath)
-		} else {
+		} else if askForPassphrase {
 			return handleAuthWithCachedPassphrase(key, keyPath)
+		} else {
+			log.Printf("Private key %s appears to be encrypted but -ask-for-passphrase flag not set", keyPath)
+			log.Println("Options:")
+			log.Println("  1. Use ssh-agent: ssh-add ~/.ssh/id_rsa")
+			log.Println("  2. Use environment variable: export SSH_KEY_PASSPHRASE='your_passphrase' and add -auth-via-env flag")
+			log.Println("  3. Add -ask-for-passphrase flag to prompt for passphrase")
+			return nil, nil // Return nil auth method instead of error
 		}
 	}
 
@@ -323,13 +338,9 @@ func handleAuthWithEnvVar(key []byte, keyPath string) (ssh.AuthMethod, error) {
 		passphrase = []byte(envPassphrase)
 		log.Println("Using passphrase from SSH_KEY_PASSPHRASE environment variable")
 	} else {
-		fmt.Printf("SSH_KEY_PASSPHRASE not set. Enter passphrase for %s: ", keyPath)
-		var err error
-		passphrase, err = term.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to read passphrase: %w", err)
-		}
-		fmt.Println() // Add newline after password input
+		log.Printf("SSH_KEY_PASSPHRASE not set for encrypted key %s", keyPath)
+		log.Println("Either set the environment variable or use -ask-for-passphrase flag")
+		return nil, fmt.Errorf("SSH_KEY_PASSPHRASE environment variable not set")
 	}
 
 	signer, err := ssh.ParsePrivateKeyWithPassphrase(key, passphrase)
@@ -341,6 +352,7 @@ func handleAuthWithEnvVar(key []byte, keyPath string) (ssh.AuthMethod, error) {
 }
 
 // handleAuthWithCachedPassphrase handles authentication with in-memory caching
+// This function is only called when askForPassphrase is true
 func handleAuthWithCachedPassphrase(key []byte, keyPath string) (ssh.AuthMethod, error) {
 	if cachedPassphrase == nil {
 		fmt.Printf("Private key appears to be encrypted. Enter passphrase for %s: ", keyPath)
