@@ -233,26 +233,22 @@ func getAuthMethods(keyPath string, authViaEnv bool, useAgent bool) ([]ssh.AuthM
 		if agentAuth := getAgentAuth(); agentAuth != nil {
 			log.Println("Using ssh-agent for authentication")
 			authMethods = append(authMethods, agentAuth)
+			// If ssh-agent is working, we can return early and skip file-based auth
+			return authMethods, nil
 		} else {
 			log.Println("ssh-agent not available or no keys loaded")
+			log.Println("Hint: Run 'ssh-add ~/.ssh/id_rsa' to add your key to ssh-agent")
 		}
 	}
 
-	// Fallback to key file authentication
+	// Fallback to key file authentication only if ssh-agent failed
+	log.Println("Falling back to key file authentication")
 	keyAuth, err := getKeyAuth(keyPath, authViaEnv)
 	if err != nil {
-		if len(authMethods) == 0 {
-			return nil, fmt.Errorf("failed to setup any authentication method: %v", err)
-		}
-		log.Printf("Warning: Failed to setup key file authentication: %v", err)
-	} else {
-		authMethods = append(authMethods, keyAuth)
+		return nil, fmt.Errorf("failed to setup key file authentication: %v", err)
 	}
 
-	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no authentication methods available")
-	}
-
+	authMethods = append(authMethods, keyAuth)
 	return authMethods, nil
 }
 
@@ -265,10 +261,27 @@ func getAgentAuth() ssh.AuthMethod {
 
 	conn, err := net.Dial("unix", agentSock)
 	if err != nil {
+		log.Printf("Failed to connect to ssh-agent: %v", err)
 		return nil
 	}
 
 	agentClient := agent.NewClient(conn)
+
+	// Test if the agent has any keys
+	signers, err := agentClient.Signers()
+	if err != nil {
+		log.Printf("Failed to get signers from ssh-agent: %v", err)
+		conn.Close()
+		return nil
+	}
+
+	if len(signers) == 0 {
+		log.Println("ssh-agent has no keys loaded")
+		conn.Close()
+		return nil
+	}
+
+	log.Printf("ssh-agent has %d key(s) loaded", len(signers))
 	return ssh.PublicKeysCallback(agentClient.Signers)
 }
 
