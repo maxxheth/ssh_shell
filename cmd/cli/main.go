@@ -116,8 +116,16 @@ func executeScript(client *ssh.Client, scriptPath string, scriptFlags string) {
 	// Construct the remote command. "bash -s" tells bash to read the script from stdin.
 	// The "--" is crucial; it signifies the end of options for bash itself,
 	// ensuring that everything in `scriptFlags` is passed as arguments to the script.
-	command := "bash -s -- " + scriptFlags
-	if err := session.Run(strings.TrimSpace(command)); err != nil {
+	var command string
+	if scriptFlags != "" {
+		// Properly handle the script flags - trim whitespace and ensure proper spacing
+		command = fmt.Sprintf("bash -s -- %s", strings.TrimSpace(scriptFlags))
+	} else {
+		command = "bash -s"
+	}
+
+	log.Printf("Executing command: %s", command)
+	if err := session.Run(command); err != nil {
 		log.Fatalf("Failed to run script with command '%s': %v", command, err)
 	}
 	log.Println("Script execution finished.")
@@ -233,6 +241,50 @@ func getAuthMethod(keyPath string) (ssh.AuthMethod, error) {
 			return nil, fmt.Errorf("failed to read passphrase: %w", err)
 		}
 		fmt.Println() // Add newline after password input
+
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(key, passphrase)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse private key with passphrase: %w", err)
+		}
+	}
+
+	return ssh.PublicKeys(signer), nil
+}
+
+// Add this alternative implementation if you want persistent caching
+
+func getAuthMethodWithEnvCache(keyPath string) (ssh.AuthMethod, error) {
+	// Try to get passphrase from environment variable first
+	envPassphrase := os.Getenv("SSH_KEY_PASSPHRASE")
+
+	// Expand tilde (~) to the user's home directory.
+	if keyPath[:2] == "~/" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("could not get user home directory: %w", err)
+		}
+		keyPath = filepath.Join(home, keyPath[2:])
+	}
+
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read private key from %s: %w", keyPath, err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		var passphrase []byte
+
+		if envPassphrase != "" {
+			passphrase = []byte(envPassphrase)
+		} else {
+			fmt.Printf("Private key appears to be encrypted. Enter passphrase for %s: ", keyPath)
+			passphrase, err = term.ReadPassword(int(os.Stdin.Fd()))
+			if err != nil {
+				return nil, fmt.Errorf("failed to read passphrase: %w", err)
+			}
+			fmt.Println()
+		}
 
 		signer, err = ssh.ParsePrivateKeyWithPassphrase(key, passphrase)
 		if err != nil {
