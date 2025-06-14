@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,8 +14,12 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
+
+// Global variable to cache the passphrase
+var cachedPassphrase []byte
 
 // main is the entry point of the application.
 // It parses command-line flags, sets up the SSH connection, and
@@ -33,7 +38,12 @@ func main() {
 	scriptPath := flag.String("script", "", "Path to a local script to execute on the remote server")
 	scriptFlags := flag.String("script-flags", "", "A string of flags to pass to the remote script (e.g., \"--backup-dir /tmp --dry-run\")")
 	keyPath := flag.String("key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to your SSH private key")
+	authViaEnv := flag.Bool("auth-via-env", false, "Use SSH_KEY_PASSPHRASE environment variable for authentication")
+	useAgent := flag.Bool("use-agent", true, "Use ssh-agent for authentication (default: true)")
 	flag.Parse()
+
+	// Ensure cached passphrase is cleared when program exits
+	defer clearCachedPassphrase()
 
 	// Resolve script path relative to the original working directory
 	if *scriptPath != "" && !filepath.IsAbs(*scriptPath) {
@@ -49,16 +59,14 @@ func main() {
 
 	// 2. Prepare the SSH client configuration.
 	// This includes authentication methods and host key verification.
-	authMethod, err := getAuthMethod(*keyPath)
+	authMethods, err := getAuthMethods(*keyPath, *authViaEnv, *useAgent)
 	if err != nil {
 		log.Fatalf("Failed to setup authentication: %v", err)
 	}
 
 	sshConfig := &ssh.ClientConfig{
 		User: *user,
-		Auth: []ssh.AuthMethod{
-			authMethod,
-		},
+		Auth: authMethods,
 		// IMPORTANT: In a production environment, you should use a more secure
 		// HostKeyCallback, like one that checks against a known_hosts file.
 		// ssh.InsecureIgnoreHostKey() is used here for convenience.
@@ -216,10 +224,58 @@ func monitorWindowSize(session *ssh.Session, fd int) {
 	}
 }
 
-// getAuthMethod creates an ssh.AuthMethod from a private key file.
-func getAuthMethod(keyPath string) (ssh.AuthMethod, error) {
+// getAuthMethods returns a slice of authentication methods, prioritizing ssh-agent if available
+func getAuthMethods(keyPath string, authViaEnv bool, useAgent bool) ([]ssh.AuthMethod, error) {
+	var authMethods []ssh.AuthMethod
+
+	// Try ssh-agent first if enabled
+	if useAgent {
+		if agentAuth := getAgentAuth(); agentAuth != nil {
+			log.Println("Using ssh-agent for authentication")
+			authMethods = append(authMethods, agentAuth)
+		} else {
+			log.Println("ssh-agent not available or no keys loaded")
+		}
+	}
+
+	// Fallback to key file authentication
+	keyAuth, err := getKeyAuth(keyPath, authViaEnv)
+	if err != nil {
+		if len(authMethods) == 0 {
+			return nil, fmt.Errorf("failed to setup any authentication method: %v", err)
+		}
+		log.Printf("Warning: Failed to setup key file authentication: %v", err)
+	} else {
+		authMethods = append(authMethods, keyAuth)
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no authentication methods available")
+	}
+
+	return authMethods, nil
+}
+
+// getAgentAuth returns an ssh-agent authentication method if available
+func getAgentAuth() ssh.AuthMethod {
+	agentSock := os.Getenv("SSH_AUTH_SOCK")
+	if agentSock == "" {
+		return nil
+	}
+
+	conn, err := net.Dial("unix", agentSock)
+	if err != nil {
+		return nil
+	}
+
+	agentClient := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(agentClient.Signers)
+}
+
+// getKeyAuth creates an ssh.AuthMethod from a private key file
+func getKeyAuth(keyPath string, authViaEnv bool) (ssh.AuthMethod, error) {
 	// Expand tilde (~) to the user's home directory.
-	if keyPath[:2] == "~/" {
+	if len(keyPath) >= 2 && keyPath[:2] == "~/" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return nil, fmt.Errorf("could not get user home directory: %w", err)
@@ -234,7 +290,46 @@ func getAuthMethod(keyPath string) (ssh.AuthMethod, error) {
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		// If the key is passphrase-protected, try parsing with passphrase
+		// If the key is passphrase-protected, handle based on authViaEnv flag
+		if authViaEnv {
+			return handleAuthWithEnvVar(key, keyPath)
+		} else {
+			return handleAuthWithCachedPassphrase(key, keyPath)
+		}
+	}
+
+	return ssh.PublicKeys(signer), nil
+}
+
+// handleAuthWithEnvVar handles authentication using environment variable
+func handleAuthWithEnvVar(key []byte, keyPath string) (ssh.AuthMethod, error) {
+	envPassphrase := os.Getenv("SSH_KEY_PASSPHRASE")
+
+	var passphrase []byte
+	if envPassphrase != "" {
+		passphrase = []byte(envPassphrase)
+		log.Println("Using passphrase from SSH_KEY_PASSPHRASE environment variable")
+	} else {
+		fmt.Printf("SSH_KEY_PASSPHRASE not set. Enter passphrase for %s: ", keyPath)
+		var err error
+		passphrase, err = term.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read passphrase: %w", err)
+		}
+		fmt.Println() // Add newline after password input
+	}
+
+	signer, err := ssh.ParsePrivateKeyWithPassphrase(key, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key with passphrase: %w", err)
+	}
+
+	return ssh.PublicKeys(signer), nil
+}
+
+// handleAuthWithCachedPassphrase handles authentication with in-memory caching
+func handleAuthWithCachedPassphrase(key []byte, keyPath string) (ssh.AuthMethod, error) {
+	if cachedPassphrase == nil {
 		fmt.Printf("Private key appears to be encrypted. Enter passphrase for %s: ", keyPath)
 		passphrase, err := term.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
@@ -242,11 +337,52 @@ func getAuthMethod(keyPath string) (ssh.AuthMethod, error) {
 		}
 		fmt.Println() // Add newline after password input
 
-		signer, err = ssh.ParsePrivateKeyWithPassphrase(key, passphrase)
+		// Cache the passphrase for future use
+		cachedPassphrase = make([]byte, len(passphrase))
+		copy(cachedPassphrase, passphrase)
+
+		// Clear the original passphrase from memory
+		for i := range passphrase {
+			passphrase[i] = 0
+		}
+	}
+
+	signer, err := ssh.ParsePrivateKeyWithPassphrase(key, cachedPassphrase)
+	if err != nil {
+		// If cached passphrase failed, clear it and try again
+		clearCachedPassphrase()
+		fmt.Printf("Incorrect passphrase. Enter passphrase for %s: ", keyPath)
+		passphrase, err := term.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
+			return nil, fmt.Errorf("failed to read passphrase: %w", err)
+		}
+		fmt.Println() // Add newline after password input
+
+		// Cache the new passphrase
+		cachedPassphrase = make([]byte, len(passphrase))
+		copy(cachedPassphrase, passphrase)
+
+		// Clear the original passphrase from memory
+		for i := range passphrase {
+			passphrase[i] = 0
+		}
+
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(key, cachedPassphrase)
+		if err != nil {
+			clearCachedPassphrase()
 			return nil, fmt.Errorf("failed to parse private key with passphrase: %w", err)
 		}
 	}
 
 	return ssh.PublicKeys(signer), nil
+}
+
+// clearCachedPassphrase securely clears the cached passphrase from memory
+func clearCachedPassphrase() {
+	if cachedPassphrase != nil {
+		for i := range cachedPassphrase {
+			cachedPassphrase[i] = 0
+		}
+		cachedPassphrase = nil
+	}
 }
