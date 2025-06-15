@@ -5,9 +5,10 @@ all: build test
 
 build:
 	@echo "Building..."
-	
-	
-	@go build -o main cmd/cli/main.go
+
+    @mkdir -p dist
+
+	@go build -o dist/ssh-shell cmd/cli/main.go
 
 # Run the application
 run:
@@ -21,7 +22,7 @@ test:
 # Clean the binary
 clean:
 	@echo "Cleaning..."
-	@rm -f main
+	@rm -f dist/ssh-shell
 
 # Live Reload
 watch:
