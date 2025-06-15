@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/maxxheth/ssh_shell/internal/auth"
+	"github.com/maxxheth/ssh_shell/internal/hostkey"
 	"github.com/maxxheth/ssh_shell/internal/script"
 	"github.com/maxxheth/ssh_shell/internal/session"
 )
@@ -35,6 +36,8 @@ func main() {
 	authViaEnv := flag.Bool("auth-via-env", false, "Use SSH_KEY_PASSPHRASE environment variable for authentication")
 	useAgent := flag.Bool("use-agent", true, "Use ssh-agent for authentication (default: true)")
 	askForPassphrase := flag.Bool("ask-for-passphrase", false, "Prompt for passphrase if key is encrypted and other methods fail")
+	knownHostsPath := flag.String("known-hosts", "", "Path to known_hosts file (defaults to ~/.ssh/known_hosts)")
+	insecureHostKey := flag.Bool("insecure-host-key", false, "Skip host key verification (INSECURE - only for development)")
 	flag.Parse()
 
 	// Ensure cached passphrase is cleared when program exits
@@ -59,13 +62,20 @@ func main() {
 		log.Fatalf("Failed to setup authentication: %v", err)
 	}
 
+	// Configure host key verification
+	var hostKeyCallback ssh.HostKeyCallback
+	if *insecureHostKey {
+		log.Println("WARNING: Host key verification disabled. This is insecure and should only be used for development.")
+		hostKeyCallback = hostkey.InsecureIgnoreHostKey()
+	} else {
+		log.Println("Using secure host key verification with known_hosts file.")
+		hostKeyCallback = hostkey.VerifyHostKey(*knownHostsPath)
+	}
+
 	sshConfig := &ssh.ClientConfig{
-		User: *user,
-		Auth: authMethods,
-		// IMPORTANT: In a production environment, you should use a more secure
-		// HostKeyCallback, like one that checks against a known_hosts file.
-		// ssh.InsecureIgnoreHostKey() is used here for convenience.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:            *user,
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         5 * time.Second,
 	}
 
