@@ -4,14 +4,16 @@
 all: build test
 
 build:
-	@echo "Building..."
-
-    @mkdir -p dist
-
+	@echo "Building the application..."
+	@mkdir -p dist
+	@echo "Compiling the binary..."
 	@go build -o dist/ssh-shell cmd/cli/main.go
+	@echo "Binary created at dist/ssh-shell"
+	@echo "Build complete."
 
 # Run the application
 run:
+	@echo "Running the application..."
 	@go run cmd/cli/main.go
 
 # Test the application
@@ -23,6 +25,7 @@ test:
 clean:
 	@echo "Cleaning..."
 	@rm -f dist/ssh-shell
+	@echo "Deleted the binary."
 
 # Live Reload
 watch:
