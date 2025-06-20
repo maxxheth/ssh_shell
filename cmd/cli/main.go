@@ -32,6 +32,7 @@ func main() {
 	port := flag.Int("port", 22, "Remote server port")
 	scriptPath := flag.String("script", "", "Path to a local script to execute on the remote server")
 	scriptFlags := flag.String("script-flags", "", "A string of flags to pass to the remote script (e.g., \"--backup-dir /tmp --dry-run\")")
+	usePython := flag.Bool("py", false, "Execute script using Python instead of bash")
 	keyPath := flag.String("key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to your SSH private key")
 	authViaEnv := flag.Bool("auth-via-env", false, "Use SSH_KEY_PASSPHRASE environment variable for authentication")
 	useAgent := flag.Bool("use-agent", true, "Use ssh-agent for authentication (default: true)")
@@ -92,7 +93,7 @@ func main() {
 	// 4. Decide whether to run a script or start an interactive shell.
 	if *scriptPath != "" {
 		// Mode 1: Execute a remote script
-		script.ExecuteScript(client, *scriptPath, *scriptFlags)
+		script.ExecuteScript(client, *scriptPath, *scriptFlags, *usePython)
 	} else {
 		// Mode 2: Start an interactive shell
 		session.StartInteractiveShell(client)
